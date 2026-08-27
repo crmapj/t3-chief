@@ -1,0 +1,4 @@
+interface:
+  display_name: "T3 Chief"
+  short_description: "Manage T3 fleets, schedules, recovery, and host jobs."
+  default_prompt: "Use t3-chief to inspect and manage my T3 fleet safely and context-efficiently."

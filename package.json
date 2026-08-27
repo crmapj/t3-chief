@@ -1,0 +1,28 @@
+{
+  "name": "t3-chief",
+  "version": "0.6.1",
+  "description": "Deterministic chief-of-staff control plane CLI for T3 Code fleets",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "t3chief": "dist/t3chief"
+  },
+  "scripts": {
+    "build": "bun build src/bin.ts --compile --outfile dist/t3chief",
+    "check": "bun run typecheck && bun run lint && bun test",
+    "format": "biome format --write .",
+    "lint": "biome check .",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "commander": "^15.0.0",
+    "cron-parser": "^5.10.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.10",
+    "bun-types": "^1.4.0",
+    "typescript": "^7.0.2"
+  }
+}
