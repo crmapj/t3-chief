@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HostJob, JobAction } from "../src/adapters/host-jobs.ts";
@@ -203,7 +203,7 @@ describe("CLI", () => {
     const code = await runCli(["--version"], io.dependencies);
 
     expect(code).toBe(0);
-    expect(io.stdout()).toBe("0.6.1\n");
+    expect(io.stdout()).toBe("0.7.0\n");
     expect(io.stderr()).toBe("");
   });
 
@@ -308,6 +308,98 @@ describe("CLI", () => {
     expect(dispatched.projectId).toBe(result.data.projectId);
     expect(dispatched.workspaceRoot).toBe("/work/fleet-tooling");
     expect(dispatched.createWorkspaceRootIfMissing).toBe(true);
+  });
+
+  test("sets a project icon from an absolute file path", async () => {
+    using ledger = new ScheduleLedger(":memory:");
+    const io = harness(ledger);
+    let dispatched: Record<string, unknown> = {};
+    io.dependencies.resolveEnvironment = async () => ({
+      ...t3,
+      dispatch: async (command: Record<string, unknown>) => {
+        dispatched = command;
+        return { sequence: 1 };
+      },
+    });
+    const iconPath = join(io.directory, "owl.png");
+    await writeFile(iconPath, "png");
+
+    const code = await runCli(
+      ["--json", "project", "icon", "--project", "project-1", "--path", iconPath],
+      io.dependencies,
+    );
+
+    expect(code).toBe(0);
+    expect(dispatched.type).toBe("project.meta.update");
+    expect(dispatched.projectId).toBe("project-1");
+    expect(dispatched.faviconPath).toBe(iconPath);
+    expect(JSON.parse(io.stdout()).data.faviconPath).toBe(iconPath);
+  });
+
+  test("clears a project icon with an explicit null", async () => {
+    using ledger = new ScheduleLedger(":memory:");
+    const io = harness(ledger);
+    let dispatched: Record<string, unknown> = {};
+    io.dependencies.resolveEnvironment = async () => ({
+      ...t3,
+      dispatch: async (command: Record<string, unknown>) => {
+        dispatched = command;
+        return { sequence: 1 };
+      },
+    });
+
+    const code = await runCli(
+      ["--json", "project", "icon", "--project", "Project", "--clear"],
+      io.dependencies,
+    );
+
+    expect(code).toBe(0);
+    expect(dispatched.faviconPath).toBeNull();
+  });
+
+  test("rejects a project icon T3 cannot render", async () => {
+    using ledger = new ScheduleLedger(":memory:");
+    const io = harness(ledger);
+    const iconPath = join(io.directory, "owl.bmp");
+    await writeFile(iconPath, "bmp");
+
+    const code = await runCli(
+      ["--json", "project", "icon", "--project", "project-1", "--path", iconPath],
+      io.dependencies,
+    );
+
+    expect(code).toBe(1);
+    expect(JSON.parse(io.stderr()).error.message).toContain(".webp");
+  });
+
+  test("rejects a missing project icon file before dispatching", async () => {
+    using ledger = new ScheduleLedger(":memory:");
+    const io = harness(ledger);
+    let dispatched = false;
+    io.dependencies.resolveEnvironment = async () => ({
+      ...t3,
+      dispatch: async () => {
+        dispatched = true;
+        return { sequence: 1 };
+      },
+    });
+
+    const code = await runCli(
+      [
+        "--json",
+        "project",
+        "icon",
+        "--project",
+        "project-1",
+        "--path",
+        join(io.directory, "absent.png"),
+      ],
+      io.dependencies,
+    );
+
+    expect(code).toBe(1);
+    expect(dispatched).toBe(false);
+    expect(JSON.parse(io.stderr()).error.message).toContain("was not found");
   });
 
   test("lists projects with thread counts", async () => {

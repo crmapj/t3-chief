@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { Command, CommanderError, Option } from "commander";
@@ -25,6 +25,15 @@ import { MaintenanceManager, RateLimitManager } from "./core/maintenance.ts";
 import { Scheduler, type SchedulerT3Port } from "./core/scheduler.ts";
 import type { LimitsReport } from "./domain/limits.ts";
 import type { InteractionMode, RuntimeMode, ScheduleRequest } from "./domain/model.ts";
+
+const fileExists = async (path: string): Promise<boolean> => {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 interface HostJobsPort {
   list(): Promise<{ jobs: HostJob[]; warnings: string[] }>;
@@ -347,7 +356,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
   program
     .name("t3chief")
     .description("Chief-of-staff control plane for T3 Code fleets")
-    .version("0.6.1")
+    .version("0.7.0")
     .option("--json", "emit a stable JSON envelope")
     .option("--quiet", "suppress successful output")
     .option("--environment <name>", "T3 environment alias")
@@ -647,6 +656,32 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
           workspaceRoot: resolve(options.workspace),
           createWorkspaceRootIfMissing: options.createWorkspace === true,
           ...(selection ? { defaultModelSelection: selection } : {}),
+        }),
+      );
+    });
+
+  project
+    .command("icon")
+    .description("set or clear a project icon shown in the T3 sidebar")
+    .requiredOption("--project <ref>", "project id, id prefix, or exact title")
+    .option("--path <file>", "image file: avif, gif, ico, jpg, jpeg, png, svg, or webp")
+    .option("--clear", "remove the project icon")
+    .action(async (options) => {
+      if (Boolean(options.path) === (options.clear === true)) {
+        throw new Error("Pass exactly one of --path or --clear.");
+      }
+      let iconPath: string | null = null;
+      if (options.path) {
+        iconPath = resolve(options.path);
+        if (!(await fileExists(iconPath))) {
+          throw new Error(`Project icon '${iconPath}' was not found.`);
+        }
+      }
+      emit(
+        "project.icon",
+        await new FleetManager(await resolveEnvironment(globals().environment)).setProjectIcon({
+          project: options.project,
+          iconPath,
         }),
       );
     });

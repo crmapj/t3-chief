@@ -37,6 +37,16 @@ export interface CreatedProject {
   receipt: unknown;
 }
 
+export interface ProjectIconUpdate {
+  projectId: string;
+  title: string;
+  faviconPath: string | null;
+  receipt: unknown;
+}
+
+const PROJECT_ICON_EXTENSION = /\.(?:avif|gif|ico|jpe?g|png|svg|webp)$/i;
+const MAX_PROJECT_ICON_PATH = 1024;
+
 interface ThreadShell {
   id: string;
   projectId: string;
@@ -223,6 +233,49 @@ export class FleetManager {
       defaultModelSelection: input.defaultModelSelection ?? null,
       receipt,
     };
+  }
+
+  /**
+   * Set (or clear) a project's icon. T3 accepts an absolute path or one relative to the workspace
+   * root; only the extensions its asset layer can preview are allowed, so a bad path is rejected
+   * here rather than silently rendering as a blank tile.
+   */
+  async setProjectIcon(input: {
+    project: string;
+    iconPath: string | null;
+  }): Promise<ProjectIconUpdate> {
+    const iconPath = input.iconPath === null ? null : input.iconPath.trim();
+    if (iconPath !== null) {
+      if (iconPath.length === 0) throw new Error("Project icon path cannot be empty.");
+      if (iconPath.length > MAX_PROJECT_ICON_PATH) {
+        throw new Error(`Project icon path must be at most ${MAX_PROJECT_ICON_PATH} characters.`);
+      }
+      if (!PROJECT_ICON_EXTENSION.test(iconPath)) {
+        throw new Error(
+          "Project icon must be an .avif, .gif, .ico, .jpg, .jpeg, .png, .svg, or .webp file.",
+        );
+      }
+    }
+    const snapshot = await this.loadShell();
+    const project = this.resolveProject(snapshot, input.project);
+    const receipt = await this.t3.dispatch({
+      type: "project.meta.update",
+      commandId: this.uuid(),
+      projectId: project.id,
+      faviconPath: iconPath,
+    });
+    return { projectId: project.id, title: project.title, faviconPath: iconPath, receipt };
+  }
+
+  private resolveProject(snapshot: ShellSnapshot, reference: string): ProjectShell {
+    const exact = snapshot.projects.find((project) => project.id === reference);
+    if (exact) return exact;
+    const candidates = snapshot.projects.filter(
+      (project) => project.id.startsWith(reference) || project.title === reference,
+    );
+    if (candidates.length === 1 && candidates[0]) return candidates[0];
+    if (candidates.length > 1) throw new Error(`Project reference '${reference}' is ambiguous.`);
+    throw new Error(`Project '${reference}' was not found.`);
   }
 
   private resolveThread(snapshot: ShellSnapshot, reference: string): ThreadShell {

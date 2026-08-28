@@ -11,6 +11,7 @@ t3chief limits configure-claude [--profile NAME --command ABSOLUTE_PATH [ARG...]
 t3chief limits statusline-sink [--profile NAME] [--exec COMMAND [ARG...]]
 t3chief project list
 t3chief project create --title TITLE --workspace ABSOLUTE_PATH [--create-workspace]
+t3chief project icon --project REF (--path IMAGE_FILE | --clear)
   [--provider INSTANCE --model SLUG] [--effort VALUE] [--option ID=VALUE]
 t3chief status
 t3chief brief THREAD --turns COUNT

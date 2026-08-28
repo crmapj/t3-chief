@@ -44,7 +44,7 @@ export class CodexQuotaSource {
     this.ttlSeconds = options.ttlSeconds ?? DEFAULT_TTL_SECONDS;
     this.allowInference = options.allowInference !== false;
     this.binary = options.binary ?? process.env.T3CHIEF_CODEX_BIN ?? "codex";
-    this.clientVersion = options.clientVersion ?? "0.6.1";
+    this.clientVersion = options.clientVersion ?? "0.7.0";
     this.timeoutMs = options.timeoutMs ?? 20_000;
   }
 

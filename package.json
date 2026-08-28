@@ -1,6 +1,6 @@
 {
   "name": "t3-chief",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Deterministic chief-of-staff control plane CLI for T3 Code fleets",
   "license": "MIT",
   "private": true,

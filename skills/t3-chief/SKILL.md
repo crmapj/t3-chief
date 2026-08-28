@@ -167,6 +167,11 @@ t3chief --json project create --title 'Concrete project title' --workspace /abso
 check `project list` first when you are unsure. Add `--create-workspace` only when T3 should create
 the directory, and `--provider`/`--model` only when the project should have a default route.
 
+`project icon --project REF --path FILE` sets the icon T3 shows for that project in the sidebar,
+which makes a pinned manager thread recognisable at a glance. The path may be absolute or relative
+to the workspace root, and must be an avif, gif, ico, jpg, jpeg, png, svg, or webp file. Use
+`--clear` to remove it.
+
 Use `--worktree --base-branch BRANCH` when T3 should prepare isolation. Follow up through
 `t3chief thread send THREAD_ID --prompt-file FILE`; this keeps the thread's current model and modes.
 
