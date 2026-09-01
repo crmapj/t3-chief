@@ -356,7 +356,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
   program
     .name("t3chief")
     .description("Chief-of-staff control plane for T3 Code fleets")
-    .version("0.7.0")
+    .version("0.8.0")
     .option("--json", "emit a stable JSON envelope")
     .option("--quiet", "suppress successful output")
     .option("--environment <name>", "T3 environment alias")
@@ -682,6 +682,33 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
         await new FleetManager(await resolveEnvironment(globals().environment)).setProjectIcon({
           project: options.project,
           iconPath,
+        }),
+      );
+    });
+
+  project
+    .command("rename")
+    .description("change a project's title, its workspace root, or both")
+    .requiredOption("--project <ref>", "project id, id prefix, or exact title")
+    .option("--title <title>", "new project title")
+    .option("--root <dir>", "new workspace root directory")
+    .action(async (options) => {
+      if (!options.title && !options.root) {
+        throw new Error("Pass --title, --root, or both.");
+      }
+      let workspaceRoot: string | undefined;
+      if (options.root) {
+        workspaceRoot = resolve(options.root);
+        if (!(await fileExists(workspaceRoot))) {
+          throw new Error(`Workspace root '${workspaceRoot}' was not found.`);
+        }
+      }
+      emit(
+        "project.rename",
+        await new FleetManager(await resolveEnvironment(globals().environment)).renameProject({
+          project: options.project,
+          ...(options.title ? { title: options.title as string } : {}),
+          ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
         }),
       );
     });

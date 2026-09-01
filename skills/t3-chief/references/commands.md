@@ -12,6 +12,7 @@ t3chief limits statusline-sink [--profile NAME] [--exec COMMAND [ARG...]]
 t3chief project list
 t3chief project create --title TITLE --workspace ABSOLUTE_PATH [--create-workspace]
 t3chief project icon --project REF (--path IMAGE_FILE | --clear)
+t3chief project rename --project REF [--title TITLE] [--root ABSOLUTE_PATH]
   [--provider INSTANCE --model SLUG] [--effort VALUE] [--option ID=VALUE]
 t3chief status
 t3chief brief THREAD --turns COUNT

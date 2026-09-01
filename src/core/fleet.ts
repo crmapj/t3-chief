@@ -44,6 +44,13 @@ export interface ProjectIconUpdate {
   receipt: unknown;
 }
 
+export interface ProjectMetaUpdate {
+  projectId: string;
+  title: string;
+  workspaceRoot: string;
+  receipt: unknown;
+}
+
 const PROJECT_ICON_EXTENSION = /\.(?:avif|gif|ico|jpe?g|png|svg|webp)$/i;
 const MAX_PROJECT_ICON_PATH = 1024;
 
@@ -265,6 +272,39 @@ export class FleetManager {
       faviconPath: iconPath,
     });
     return { projectId: project.id, title: project.title, faviconPath: iconPath, receipt };
+  }
+
+  async renameProject(input: {
+    project: string;
+    title?: string;
+    workspaceRoot?: string;
+  }): Promise<ProjectMetaUpdate> {
+    const title = input.title?.trim();
+    const workspaceRoot = input.workspaceRoot?.trim();
+    if (title === undefined && workspaceRoot === undefined) {
+      throw new Error("Pass --title, --root, or both.");
+    }
+    if (title !== undefined && title.length === 0) {
+      throw new Error("Project title cannot be empty.");
+    }
+    if (workspaceRoot !== undefined && workspaceRoot.length === 0) {
+      throw new Error("Project workspace root cannot be empty.");
+    }
+    const snapshot = await this.loadShell();
+    const project = this.resolveProject(snapshot, input.project);
+    const receipt = await this.t3.dispatch({
+      type: "project.meta.update",
+      commandId: this.uuid(),
+      projectId: project.id,
+      ...(title === undefined ? {} : { title }),
+      ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
+    });
+    return {
+      projectId: project.id,
+      title: title ?? project.title,
+      workspaceRoot: workspaceRoot ?? project.workspaceRoot,
+      receipt,
+    };
   }
 
   private resolveProject(snapshot: ShellSnapshot, reference: string): ProjectShell {

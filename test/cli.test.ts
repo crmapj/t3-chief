@@ -203,7 +203,7 @@ describe("CLI", () => {
     const code = await runCli(["--version"], io.dependencies);
 
     expect(code).toBe(0);
-    expect(io.stdout()).toBe("0.7.0\n");
+    expect(io.stdout()).toBe("0.8.0\n");
     expect(io.stderr()).toBe("");
   });
 
@@ -370,6 +370,111 @@ describe("CLI", () => {
 
     expect(code).toBe(1);
     expect(JSON.parse(io.stderr()).error.message).toContain(".webp");
+  });
+
+  test("renames a project title and workspace root together", async () => {
+    using ledger = new ScheduleLedger(":memory:");
+    const io = harness(ledger);
+    let dispatched: Record<string, unknown> = {};
+    io.dependencies.resolveEnvironment = async () => ({
+      ...t3,
+      dispatch: async (command: Record<string, unknown>) => {
+        dispatched = command;
+        return { sequence: 1 };
+      },
+    });
+
+    const code = await runCli(
+      [
+        "--json",
+        "project",
+        "rename",
+        "--project",
+        "project-1",
+        "--title",
+        "head-of-labs",
+        "--root",
+        io.directory,
+      ],
+      io.dependencies,
+    );
+
+    expect(code).toBe(0);
+    expect(dispatched.type).toBe("project.meta.update");
+    expect(dispatched.title).toBe("head-of-labs");
+    expect(dispatched.workspaceRoot).toBe(io.directory);
+  });
+
+  test("renames a project title without touching its workspace root", async () => {
+    using ledger = new ScheduleLedger(":memory:");
+    const io = harness(ledger);
+    let dispatched: Record<string, unknown> = {};
+    io.dependencies.resolveEnvironment = async () => ({
+      ...t3,
+      dispatch: async (command: Record<string, unknown>) => {
+        dispatched = command;
+        return { sequence: 1 };
+      },
+    });
+
+    const code = await runCli(
+      ["--json", "project", "rename", "--project", "project-1", "--title", "renamed"],
+      io.dependencies,
+    );
+
+    expect(code).toBe(0);
+    expect(dispatched.title).toBe("renamed");
+    expect("workspaceRoot" in dispatched).toBe(false);
+  });
+
+  test("rejects a rename with neither title nor root", async () => {
+    using ledger = new ScheduleLedger(":memory:");
+    const io = harness(ledger);
+    let dispatched = false;
+    io.dependencies.resolveEnvironment = async () => ({
+      ...t3,
+      dispatch: async () => {
+        dispatched = true;
+        return { sequence: 1 };
+      },
+    });
+
+    const code = await runCli(
+      ["--json", "project", "rename", "--project", "project-1"],
+      io.dependencies,
+    );
+
+    expect(code).not.toBe(0);
+    expect(dispatched).toBe(false);
+  });
+
+  test("rejects a missing workspace root before dispatching", async () => {
+    using ledger = new ScheduleLedger(":memory:");
+    const io = harness(ledger);
+    let dispatched = false;
+    io.dependencies.resolveEnvironment = async () => ({
+      ...t3,
+      dispatch: async () => {
+        dispatched = true;
+        return { sequence: 1 };
+      },
+    });
+
+    const code = await runCli(
+      [
+        "--json",
+        "project",
+        "rename",
+        "--project",
+        "project-1",
+        "--root",
+        join(io.directory, "nope"),
+      ],
+      io.dependencies,
+    );
+
+    expect(code).not.toBe(0);
+    expect(dispatched).toBe(false);
   });
 
   test("rejects a missing project icon file before dispatching", async () => {

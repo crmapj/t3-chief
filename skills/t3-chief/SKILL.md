@@ -172,6 +172,11 @@ which makes a pinned manager thread recognisable at a glance. The path may be ab
 to the workspace root, and must be an avif, gif, ico, jpg, jpeg, png, svg, or webp file. Use
 `--clear` to remove it.
 
+`project rename --project REF` changes a project's title, its workspace root, or both in one
+command. Use it after renaming a directory on disk: the project keeps its id and every existing
+thread, which a delete-and-recreate would lose. `--root` must point at a directory that exists and
+is not already claimed by another project.
+
 Use `--worktree --base-branch BRANCH` when T3 should prepare isolation. Follow up through
 `t3chief thread send THREAD_ID --prompt-file FILE`; this keeps the thread's current model and modes.
 
