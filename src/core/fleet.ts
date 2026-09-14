@@ -112,6 +112,56 @@ const STATE_ORDER: Record<ManagerThreadState, number> = {
   snoozed: 7,
 };
 
+/** `blocked` is the label the status summary already collapses both blocked states under. */
+const STATE_ALIASES: Record<string, ManagerThreadState[]> = {
+  blocked: ["blocked-approval", "blocked-input"],
+};
+
+/** Reported only when `brief` was asked for a bound, so the caller can see what it cost. */
+export interface BriefBounds {
+  turnLimit: number;
+  maxMessages: number | null;
+  since: string | null;
+  available: number;
+  returned: number;
+  dropped: number;
+}
+
+export type ThreadOrder = "state" | "age";
+
+export interface StatusOptions {
+  includeSettled?: boolean;
+  project?: string;
+  states?: string[];
+  staleForMilliseconds?: number;
+  order?: ThreadOrder;
+}
+
+export function resolveStateFilter(values: string[]): Set<ManagerThreadState> {
+  const states = new Set<ManagerThreadState>();
+  for (const value of values) {
+    const normalized = value.trim().toLowerCase();
+    const alias = STATE_ALIASES[normalized];
+    if (alias) {
+      for (const state of alias) states.add(state);
+      continue;
+    }
+    if (!(normalized in STATE_ORDER)) {
+      const known = [...Object.keys(STATE_ORDER), ...Object.keys(STATE_ALIASES)].join(", ");
+      throw new Error(`Unknown thread state '${value}'. Use one of: ${known}.`);
+    }
+    states.add(normalized as ManagerThreadState);
+  }
+  return states;
+}
+
+/** A thread whose timestamp is missing or unparseable cannot be proven stale, so it sorts last. */
+function instantMilliseconds(value: string | undefined): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
 function shellSnapshot(value: unknown): ShellSnapshot {
   const record = value as Partial<ShellSnapshot>;
   return {
@@ -329,12 +379,26 @@ export class FleetManager {
     throw new Error(`Thread '${reference}' was not found.`);
   }
 
-  async status(options: { includeSettled?: boolean } = {}): Promise<{
+  /**
+   * Classify the unsettled fleet from the shell alone. Filters narrow that set without loading a
+   * single message body, and the summary always describes the threads actually returned.
+   */
+  async status(options: StatusOptions = {}): Promise<{
     summary: Record<string, number>;
     threads: ManagerThread[];
   }> {
     const snapshot = await this.loadShell();
     const projectTitles = new Map(snapshot.projects.map((project) => [project.id, project.title]));
+    const projectId =
+      options.project === undefined ? undefined : this.resolveProject(snapshot, options.project).id;
+    const states =
+      options.states === undefined || options.states.length === 0
+        ? undefined
+        : resolveStateFilter(options.states);
+    const staleBefore =
+      options.staleForMilliseconds === undefined
+        ? undefined
+        : Date.parse(this.now()) - options.staleForMilliseconds;
     const selected = options.includeSettled
       ? snapshot.threads.filter((thread) => !thread.archivedAt && !thread.deletedAt)
       : snapshot.threads.filter(activeUnsettled);
@@ -353,10 +417,23 @@ export class FleetManager {
           ...(thread.updatedAt ? { updatedAt: thread.updatedAt } : {}),
         };
       })
-      .sort(
-        (left, right) =>
-          STATE_ORDER[left.state] - STATE_ORDER[right.state] || left.id.localeCompare(right.id),
-      );
+      .filter((thread) => projectId === undefined || thread.projectId === projectId)
+      .filter((thread) => states === undefined || states.has(thread.state))
+      .filter((thread) => {
+        if (staleBefore === undefined) return true;
+        const updatedAt = instantMilliseconds(thread.updatedAt);
+        return updatedAt !== null && updatedAt <= staleBefore;
+      })
+      .sort((left, right) => {
+        if (options.order === "age") {
+          const leftAge = instantMilliseconds(left.updatedAt) ?? Number.MAX_SAFE_INTEGER;
+          const rightAge = instantMilliseconds(right.updatedAt) ?? Number.MAX_SAFE_INTEGER;
+          return leftAge - rightAge || left.id.localeCompare(right.id);
+        }
+        return (
+          STATE_ORDER[left.state] - STATE_ORDER[right.state] || left.id.localeCompare(right.id)
+        );
+      });
     const summary: Record<string, number> = { total: threads.length };
     for (const thread of threads) {
       const key = thread.state.startsWith("blocked-") ? "blocked" : thread.state;
@@ -365,10 +442,22 @@ export class FleetManager {
     return { summary, threads };
   }
 
+  /**
+   * Project the tail of one thread under explicit bounds.
+   *
+   * `turnLimit` is the window T3 itself applies, and it counts user-anchored turns. A thread that
+   * drives itself accumulates many assistant messages against few user messages, so that window
+   * bounds nothing on exactly the threads worth inspecting: asking for three turns can return
+   * hundreds of messages. `maxMessages` and `sinceMilliseconds` bound the projection instead,
+   * independently of turn structure, and are applied to the newest messages first so the per-
+   * message and total character caps are spent on the context that was actually asked for.
+   */
   async brief(
     reference: string,
     options: {
       turnLimit?: number;
+      maxMessages?: number;
+      sinceMilliseconds?: number;
       maxMessageCharacters?: number;
       maxTotalCharacters?: number;
     } = {},
@@ -376,6 +465,7 @@ export class FleetManager {
     thread: Record<string, unknown>;
     messages: Array<Record<string, unknown>>;
     page: unknown;
+    bounds?: BriefBounds;
   }> {
     const requestedTurnLimit = options.turnLimit ?? 50;
     if (
@@ -385,6 +475,13 @@ export class FleetManager {
     ) {
       throw new Error("Thread context turn limit must be an integer between 1 and 150.");
     }
+    const maxMessages = options.maxMessages;
+    if (
+      maxMessages !== undefined &&
+      (!Number.isInteger(maxMessages) || maxMessages < 1 || maxMessages > 1_000)
+    ) {
+      throw new Error("Thread context message cap must be an integer between 1 and 1000.");
+    }
     const snapshot = await this.loadShell();
     const shell = this.resolveThread(snapshot, reference);
     const detail = (await this.t3.thread(shell.id, { turnLimit: requestedTurnLimit })) as {
@@ -392,9 +489,24 @@ export class FleetManager {
       page?: unknown;
     };
     if (!detail.thread) throw new Error(`T3 returned no detail for thread '${shell.id}'.`);
+    const available = detail.thread.messages ?? [];
+    const cutoff =
+      options.sinceMilliseconds === undefined
+        ? null
+        : Date.parse(this.now()) - options.sinceMilliseconds;
+    const selected = (
+      cutoff === null
+        ? available
+        : available.filter((message) => {
+            const createdAt = instantMilliseconds(
+              typeof message.createdAt === "string" ? message.createdAt : undefined,
+            );
+            return createdAt !== null && createdAt >= cutoff;
+          })
+    ).slice(maxMessages === undefined ? 0 : -maxMessages);
     const maxMessage = options.maxMessageCharacters ?? 8_000;
     let remaining = options.maxTotalCharacters ?? 80_000;
-    const messages = (detail.thread.messages ?? [])
+    const messages = selected
       .toReversed()
       .flatMap((message) => {
         if (remaining <= 0) return [];
@@ -405,7 +517,24 @@ export class FleetManager {
       })
       .toReversed();
     const { messages: _messages, ...thread } = detail.thread;
-    return { thread, messages, page: detail.page ?? null };
+    const bounded = maxMessages !== undefined || cutoff !== null;
+    return {
+      thread,
+      messages,
+      page: detail.page ?? null,
+      ...(bounded
+        ? {
+            bounds: {
+              turnLimit: requestedTurnLimit,
+              maxMessages: maxMessages ?? null,
+              since: cutoff === null ? null : new Date(cutoff).toISOString(),
+              available: available.length,
+              returned: messages.length,
+              dropped: available.length - messages.length,
+            },
+          }
+        : {}),
+    };
   }
 
   async send(reference: string, text: string): Promise<unknown> {

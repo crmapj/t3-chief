@@ -17,18 +17,21 @@ reads T3's database.
    is one long-lived T3 thread, pinned at the top of the fleet and anchored to its own folder
    carrying that role's instructions and personality, which the agent loads on every start.
 2. **Managers delegate; they don't do the work inline.** A manager checks `providers` and `limits`,
-   opens a worker thread with a self-contained brief, and passes `--reply-to` with its own thread
-   ID so the worker reports the outcome back to it.
-3. **Managers run the loop.** `status` to scan the fleet without spending context, `brief` to read
-   just enough of one thread, `thread send` to steer, `settle-ready` to close finished work, and
-   `schedule` for their own recurring pass.
+   opens a worker thread with a self-contained brief, and either passes `--reply-to` with its own
+   thread ID so the worker reports the outcome back to it, or passes `--do-not-report` and polls
+   the worker's own thread instead.
+3. **Managers run the loop.** `status` to scan and filter the fleet without spending context,
+   `brief` to read a bounded slice of one thread, `thread send` to steer, `settle-ready` to close
+   finished work, and `schedule` for their own recurring pass.
 
 You talk to the pinned managers. The managers run the fleet.
 
 ## What works
 
-- Scan every active unsettled thread without loading message bodies.
-- Read only the latest requested user-turn window, with local per-message and total text caps.
+- Scan every active unsettled thread without loading message bodies, filtered by project, state, or
+  staleness, and ordered by state priority or age.
+- Read a bounded slice of one thread: a turn window, a hard message cap, a recency cutoff, and
+  local per-message and total text caps.
 - Start or drive threads with the exact provider instance, model, and model options advertised by
   the live T3 environment.
 - Interrupt, settle, unsettle, and conservatively settle completed threads in bulk.
@@ -116,16 +119,29 @@ t3chief host install --backend systemd-user --executable "$HOME/.local/bin/t3chi
 
 ```sh
 t3chief --json status
-t3chief --json brief THREAD_ID --turns 10
+t3chief --json status --state blocked --state failed
+t3chief --json status --project PROJECT_ID --stale 2d --order age
+t3chief --json brief THREAD_ID --max-messages 40
 t3chief --json thread send THREAD_ID --prompt-file follow-up.md
 t3chief --json settle-ready
 t3chief --json settle-ready --apply
 ```
 
-`status` reads only T3 shells. Use `brief` only for blocked, failed, completed, stale, or explicitly
-requested threads. `--turns 50` means the last 50 user-anchored turns, not necessarily 50 visible
-messages; related agent and subagent items may also be returned. The client then caps each message
-at 8,000 characters and the whole projection at 80,000 characters.
+`status` reads only T3 shells, with or without filters. `--project` accepts an ID, an unambiguous
+ID prefix, or an exact title; `--state` is repeatable and accepts `blocked` for both blocked states;
+`--stale` takes a duration and keeps only threads not updated within it; `--order age` puts the
+oldest update first. The summary counts what was returned, and bare `status` output is unchanged.
+
+Use `brief` only for blocked, failed, completed, stale, or explicitly requested threads, and bound
+it. `--turns 50` means the last 50 user-anchored turns, not 50 messages: a thread that drives itself
+accumulates many assistant messages against few user messages, so even `--turns 3` can return
+hundreds of messages on a long-running manager thread. `--max-messages N` keeps the newest N of that
+window and `--since DURATION` keeps only messages newer than a cutoff, both independent of turn
+structure. The client then caps each message at 8,000 characters and the whole projection at 80,000
+characters. When either bound is used, the envelope reports how many messages the window held and
+how many were dropped.
+
+A duration is one whole number and one unit: `s`, `m`, `h`, `d`, or `w`.
 
 A dedicated manager can schedule its own recurring pass by targeting its existing T3 thread:
 
@@ -170,6 +186,23 @@ Provider names, model slugs, and option values are never hard-coded into the sch
 checks the live instance's enabled, installed, availability, status, and authentication fields.
 `--effort` maps onto the matching live option descriptor, while `--option id=value` selects any
 advertised model option directly.
+
+### Reply back, or poll
+
+Say which one you want; the worker cannot guess. `thread start` and `thread send` take one of two
+mutually exclusive flags, and each appends a deterministic footer:
+
+```sh
+t3chief thread send THREAD_ID --reply-to MY_THREAD_ID --prompt-file follow-up.md
+t3chief thread send THREAD_ID --do-not-report --prompt-file follow-up.md
+```
+
+`--reply-to` names the thread the worker reports outcome, evidence, and open questions back to.
+`--do-not-report` tells the worker not to message the delegator, not to acknowledge the instruction,
+to keep working, and to leave one concise result in its own thread; the delegator reads it later
+with `status` and `brief`. Pull-based supervision scales better across a large fleet, and a session
+that is not itself a T3 thread has no reply address to give. Passing both is rejected. Never
+hand-write either footer.
 
 ## Provider headroom
 

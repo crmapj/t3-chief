@@ -8,15 +8,17 @@ uses a versioned envelope and writes errors as JSON to stderr.
 
 ```text
 t3chief providers
-t3chief status
-t3chief brief THREAD [--turns 1..150]
+t3chief status [--project REF] [--state STATE] [--stale DURATION] [--order state|age]
+t3chief brief THREAD [--turns 1..150] [--max-messages 1..1000] [--since DURATION]
 t3chief settle-ready [--apply]
 
 t3chief thread send THREAD [--prompt TEXT | --prompt-file PATH | stdin]
+  [--reply-to THREAD | --do-not-report]
 t3chief thread start --project ID --title TITLE --provider INSTANCE --model SLUG
   [--option ID=VALUE] [--effort VALUE]
   [--runtime-mode MODE] [--interaction-mode MODE]
   [--worktree --base-branch BRANCH --start-from-origin]
+  [--reply-to THREAD | --do-not-report]
   [--prompt TEXT | --prompt-file PATH | stdin]
 t3chief thread interrupt THREAD
 t3chief thread settle THREAD
@@ -25,6 +27,63 @@ t3chief thread unsettle THREAD
 
 Exact IDs are preferred. An unambiguous ID prefix or exact title can be used for interactive reads;
 mutations reject ambiguous references.
+
+A duration is one whole number and one unit: `s`, `m`, `h`, `d`, or `w`. `45s`, `90m`, and `3d` are
+valid; a bare `90` and a compound `1h30m` are rejected, because a unitless bound means something
+different to every caller.
+
+### Bounding a brief
+
+`--turns` is the window T3 itself applies, and it counts user-anchored turns. A thread that drives
+itself accumulates many assistant messages against few user messages, so that window bounds nothing
+on exactly the threads worth inspecting: a request for three turns can return several hundred
+messages. Bound the projection directly instead:
+
+- `--max-messages N` keeps the newest N messages of the window.
+- `--since DURATION` keeps messages at or newer than the cutoff. A message T3 returns without a
+  parseable timestamp cannot be shown to be recent, so it counts as outside the window.
+
+The bounds compose in one order, and each one only ever removes messages:
+
+1. T3 returns the last `--turns` user-anchored turns.
+2. `--since` drops everything older than the cutoff.
+3. `--max-messages` keeps the newest survivors.
+4. The per-message 8,000-character cap and the 80,000-character total cap apply to what is left.
+
+Neither new flag widens the turn window, and neither changes the default. With either one present,
+the envelope carries a `bounds` object: the turn window used, the cutoff, how many messages the
+window held, how many were returned, and how many were dropped. Without them the envelope is
+exactly what it was.
+
+### Filtering status
+
+`status` remains unsettled-only and still loads no message bodies; the filters run against the same
+shell snapshot.
+
+- `--project REF` takes a project ID, an unambiguous ID prefix, or an exact title. An unknown or
+  ambiguous reference fails rather than reporting an empty fleet.
+- `--state STATE` is repeatable and accepts `blocked-approval`, `blocked-input`, `failed`,
+  `running`, `queued`, `review`, `idle`, `snoozed`, and `blocked` for both blocked states.
+- `--stale DURATION` keeps only threads whose last update is at least that old. A thread without a
+  usable timestamp is never reported as stale.
+- `--order` is `state` for state priority, the default, or `age` for oldest update first. Threads
+  with no timestamp sort last.
+
+The summary counts the threads actually returned, so a filtered report stays internally consistent.
+Bare `status` output is byte-for-byte what it was. The human rows are unchanged in every mode; read
+`updatedAt` from `--json` when you need the exact age.
+
+### Delegation footers
+
+`--reply-to THREAD` appends a deterministic reply-back footer naming the thread the worker reports
+to. `--do-not-report` appends the opposite instruction: do not message the delegator, do not
+acknowledge the instruction, keep working the assigned task, record progress and evidence in your
+own report, and leave one concise result in your own thread when finished or blocked. Use it when
+the delegator polls with `status` and `brief` instead of waiting to be told.
+
+The two flags are mutually exclusive and the pair is rejected, because together they would instruct
+a worker both to report and not to report. Never hand-write either footer; the flags keep the format
+uniform.
 
 ## Projects
 

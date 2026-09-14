@@ -19,10 +19,16 @@ import {
   T3V1Client,
 } from "./adapters/t3-v1.ts";
 import { ConfigStore, defaultRunCommand, exchangePairingCredential } from "./config.ts";
-import { FleetManager, type ProjectSummary, type T3FleetPort } from "./core/fleet.ts";
+import {
+  FleetManager,
+  type ProjectSummary,
+  type T3FleetPort,
+  type ThreadOrder,
+} from "./core/fleet.ts";
 import { LimitsReporter, type LimitsSource, type ProviderProbe } from "./core/limits.ts";
 import { MaintenanceManager, RateLimitManager } from "./core/maintenance.ts";
 import { Scheduler, type SchedulerT3Port } from "./core/scheduler.ts";
+import { parseDuration } from "./domain/duration.ts";
 import type { LimitsReport } from "./domain/limits.ts";
 import type { InteractionMode, RuntimeMode, ScheduleRequest } from "./domain/model.ts";
 
@@ -132,14 +138,35 @@ async function defaultReadStdin(): Promise<string> {
   return value;
 }
 
-export function withReplyTo(text: string, replyTo: string | undefined): string {
-  if (replyTo === undefined) return text;
-  const id = replyTo.trim();
+function withFooter(text: string, lines: string[]): string {
+  return [text.trimEnd(), "", "---", ...lines, ""].join("\n");
+}
+
+/**
+ * Append exactly one deterministic delegation footer. `--reply-to` names the thread the worker
+ * reports back to; `--do-not-report` states the opposite instruction for a delegator that polls.
+ * Both at once would tell the worker to report and not to report, so the pair is rejected.
+ */
+export function withDelegationFooter(
+  text: string,
+  options: { replyTo?: string; doNotReport?: boolean },
+): string {
+  if (options.replyTo !== undefined && options.doNotReport === true) {
+    throw new Error("Use only one of --reply-to or --do-not-report.");
+  }
+  if (options.doNotReport === true) {
+    return withFooter(text, [
+      "DO NOT REPORT BACK",
+      "The delegator polls this thread and reads the result here. Do not send messages to the",
+      "delegator. Do not acknowledge this instruction. Keep working the assigned task, record",
+      "progress and evidence in your own report, and leave one concise result in this thread when",
+      "you finish or become blocked.",
+    ]);
+  }
+  if (options.replyTo === undefined) return text;
+  const id = options.replyTo.trim();
   if (id.length === 0) throw new Error("--reply-to requires a thread id.");
-  return [
-    text.trimEnd(),
-    "",
-    "---",
+  return withFooter(text, [
     `REPLY-TO THREAD: ${id}`,
     `The delegating manager runs in T3 thread ${id}. When you complete this work, become blocked,`,
     "or need a decision, report back with:",
@@ -147,8 +174,7 @@ export function withReplyTo(text: string, replyTo: string | undefined): string {
     `  t3chief thread send ${id} --prompt 'Concise status: outcome, evidence, open questions.'`,
     "",
     "Send one concise reply, not a transcript. Never settle or interrupt that thread.",
-    "",
-  ].join("\n");
+  ]);
 }
 
 async function promptText(
@@ -356,7 +382,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
   program
     .name("t3chief")
     .description("Chief-of-staff control plane for T3 Code fleets")
-    .version("0.8.0")
+    .version("0.9.0")
     .option("--json", "emit a stable JSON envelope")
     .option("--quiet", "suppress successful output")
     .option("--environment <name>", "T3 environment alias")
@@ -512,16 +538,49 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
   program
     .command("status")
     .description("show active unsettled T3 threads without loading bodies")
-    .action(async () => {
-      emit("status", await (await fleet()).status());
-    });
+    .option("--project <ref>", "only threads in this project id, id prefix, or exact title")
+    .option("--state <state>", "only threads in this state (repeatable)", collect, [])
+    .option("--stale <duration>", "only threads not updated within this duration, such as 2d")
+    .addOption(
+      new Option("--order <order>", "sort by state priority or oldest update first")
+        .choices(["state", "age"])
+        .default("state"),
+    )
+    .action(
+      async (options: { project?: string; state: string[]; stale?: string; order: string }) => {
+        emit(
+          "status",
+          await (await fleet()).status({
+            ...(options.project === undefined ? {} : { project: options.project }),
+            ...(options.state.length === 0 ? {} : { states: options.state }),
+            ...(options.stale === undefined
+              ? {}
+              : { staleForMilliseconds: parseDuration(options.stale, "--stale") }),
+            order: options.order as ThreadOrder,
+          }),
+        );
+      },
+    );
 
   program
     .command("brief")
     .argument("<thread>")
     .option("--turns <count>", "number of recent user turns", "50")
-    .action(async (thread, options) => {
-      emit("brief", await (await fleet()).brief(thread, { turnLimit: Number(options.turns) }));
+    .option("--max-messages <count>", "hard cap on projected messages, newest kept")
+    .option("--since <duration>", "only messages newer than this age, such as 90m")
+    .action(async (thread, options: { turns: string; maxMessages?: string; since?: string }) => {
+      emit(
+        "brief",
+        await (await fleet()).brief(thread, {
+          turnLimit: Number(options.turns),
+          ...(options.maxMessages === undefined
+            ? {}
+            : { maxMessages: Number(options.maxMessages) }),
+          ...(options.since === undefined
+            ? {}
+            : { sinceMilliseconds: parseDuration(options.since, "--since") }),
+        }),
+      );
     });
 
   program
@@ -541,12 +600,16 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       "--reply-to <thread>",
       "sender's own thread id; appends a deterministic reply-back footer",
     )
+    .option(
+      "--do-not-report",
+      "append a deterministic do-not-report footer; the delegator polls instead",
+    )
     .action(async (reference, options) => {
       emit(
         "thread.send",
         await (await fleet()).send(
           reference,
-          withReplyTo(await promptText(options, readStdin), options.replyTo),
+          withDelegationFooter(await promptText(options, readStdin), options),
         ),
       );
     });
@@ -587,6 +650,10 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       "--reply-to <thread>",
       "sender's own thread id; appends a deterministic reply-back footer",
     )
+    .option(
+      "--do-not-report",
+      "append a deterministic do-not-report footer; the delegator polls instead",
+    )
     .action(async (options) => {
       const client = await resolveEnvironment(globals().environment);
       const selection: ModelSelection = {
@@ -601,7 +668,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
         await new FleetManager(client).start({
           projectId: options.project,
           title: options.title,
-          text: withReplyTo(await promptText(options, readStdin), options.replyTo),
+          text: withDelegationFooter(await promptText(options, readStdin), options),
           modelSelection: selection,
           runtimeMode: options.runtimeMode as RuntimeMode,
           interactionMode: options.interactionMode as InteractionMode,

@@ -366,3 +366,325 @@ describe("fleet manager", () => {
     ).rejects.toThrow("not advertised");
   });
 });
+
+const TRIAGE_NOW = "2030-03-01T12:00:00.000Z";
+
+/** Minutes before `TRIAGE_NOW`, so every fixture timestamp reads as an age. */
+function minutesAgo(minutes: number): string {
+  return new Date(Date.parse(TRIAGE_NOW) - minutes * 60_000).toISOString();
+}
+
+function triageThread(
+  id: string,
+  projectId: string,
+  overrides: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    id,
+    projectId,
+    title: id,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    modelSelection: { instanceId: "codex", model: "gpt-test" },
+    session: { status: "idle" },
+    settledOverride: null,
+    archivedAt: null,
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    ...overrides,
+  };
+}
+
+function makeTriagePort(): T3FleetPort {
+  return {
+    catalog: async () => catalog,
+    shell: async () => ({
+      projects: [
+        { id: "project-1", title: "Alpha", workspaceRoot: "/work/alpha" },
+        { id: "project-2", title: "Beta", workspaceRoot: "/work/beta" },
+      ],
+      threads: [
+        triageThread("alpha-fresh", "project-1", {
+          latestTurn: { state: "completed" },
+          updatedAt: minutesAgo(30),
+        }),
+        triageThread("alpha-boundary", "project-1", {
+          latestTurn: { state: "completed" },
+          updatedAt: minutesAgo(1_440),
+        }),
+        triageThread("alpha-stale", "project-1", {
+          latestTurn: { state: "failed" },
+          updatedAt: minutesAgo(4_320),
+        }),
+        triageThread("alpha-undated", "project-1", { latestTurn: { state: "completed" } }),
+        triageThread("beta-blocked", "project-2", {
+          latestTurn: { state: "completed" },
+          hasPendingApprovals: true,
+          updatedAt: minutesAgo(2_880),
+        }),
+        triageThread("beta-settled", "project-2", {
+          latestTurn: { state: "completed" },
+          settledOverride: "settled",
+          updatedAt: minutesAgo(10_080),
+        }),
+      ],
+    }),
+    thread: async (threadId) => ({ thread: { id: threadId, messages: [] } }),
+    dispatch: async () => ({ sequence: 1 }),
+  };
+}
+
+function triageManager(): FleetManager {
+  return new FleetManager(makeTriagePort(), { now: () => TRIAGE_NOW });
+}
+
+describe("fleet status filters", () => {
+  test("returns every unsettled thread when no filter is given", async () => {
+    const status = await triageManager().status();
+
+    expect(status.threads.map((thread) => thread.id)).toEqual([
+      "beta-blocked",
+      "alpha-stale",
+      "alpha-boundary",
+      "alpha-fresh",
+      "alpha-undated",
+    ]);
+    expect(status.summary).toEqual({ total: 5, blocked: 1, failed: 1, review: 3 });
+  });
+
+  test("restricts the fleet to one project by title or id prefix", async () => {
+    const byTitle = await triageManager().status({ project: "Beta" });
+    const byPrefix = await triageManager().status({ project: "project-1" });
+
+    expect(byTitle.threads.map((thread) => thread.id)).toEqual(["beta-blocked"]);
+    expect(byTitle.summary).toEqual({ total: 1, blocked: 1 });
+    expect(byPrefix.threads.every((thread) => thread.projectId === "project-1")).toBe(true);
+  });
+
+  test("rejects a project reference the fleet does not have", async () => {
+    expect(triageManager().status({ project: "Gamma" })).rejects.toThrow("was not found");
+  });
+
+  test("restricts the fleet to named states and expands the blocked alias", async () => {
+    const failed = await triageManager().status({ states: ["failed"] });
+    const blocked = await triageManager().status({ states: ["blocked"] });
+    const either = await triageManager().status({ states: ["failed", "blocked"] });
+
+    expect(failed.threads.map((thread) => thread.id)).toEqual(["alpha-stale"]);
+    expect(blocked.threads.map((thread) => thread.id)).toEqual(["beta-blocked"]);
+    expect(either.threads.map((thread) => thread.id)).toEqual(["beta-blocked", "alpha-stale"]);
+    expect(either.summary).toEqual({ total: 2, blocked: 1, failed: 1 });
+  });
+
+  test("rejects a state the classifier never produces", async () => {
+    expect(triageManager().status({ states: ["done"] })).rejects.toThrow("Unknown thread state");
+  });
+
+  test("treats a thread updated exactly one bound ago as stale, and a newer one as fresh", async () => {
+    const day = await triageManager().status({ staleForMilliseconds: 24 * 60 * 60_000 });
+    const justOver = await triageManager().status({
+      staleForMilliseconds: 24 * 60 * 60_000 + 60_000,
+    });
+
+    expect(day.threads.map((thread) => thread.id)).toEqual([
+      "beta-blocked",
+      "alpha-stale",
+      "alpha-boundary",
+    ]);
+    expect(justOver.threads.map((thread) => thread.id)).toEqual(["beta-blocked", "alpha-stale"]);
+  });
+
+  test("never reports an undated thread as stale", async () => {
+    const stale = await triageManager().status({ staleForMilliseconds: 60_000 });
+
+    expect(stale.threads.map((thread) => thread.id)).not.toContain("alpha-undated");
+  });
+
+  test("orders by oldest update first and sorts undated threads last", async () => {
+    const byAge = await triageManager().status({ order: "age" });
+
+    expect(byAge.threads.map((thread) => thread.id)).toEqual([
+      "alpha-stale",
+      "beta-blocked",
+      "alpha-boundary",
+      "alpha-fresh",
+      "alpha-undated",
+    ]);
+  });
+
+  test("combines every filter and summarizes only what it returns", async () => {
+    const combined = await triageManager().status({
+      project: "Alpha",
+      states: ["failed", "review"],
+      staleForMilliseconds: 12 * 60 * 60_000,
+      order: "age",
+    });
+
+    expect(combined.threads.map((thread) => thread.id)).toEqual(["alpha-stale", "alpha-boundary"]);
+    expect(combined.summary).toEqual({ total: 2, failed: 1, review: 1 });
+  });
+});
+
+/**
+ * A self-driven thread: one user message followed by a long run of assistant messages. The whole
+ * transcript sits inside a single user-anchored turn, which is why the turn window cannot bound it.
+ */
+function makeSelfDrivenPort(): T3FleetPort & { requested: Array<Record<string, unknown>> } {
+  const requested: Array<Record<string, unknown>> = [];
+  const messages = [
+    { id: "u1", role: "user", text: "Supervise the fleet.", createdAt: minutesAgo(600) },
+    ...Array.from({ length: 40 }, (_, index) => ({
+      id: `a${index + 1}`,
+      role: "assistant",
+      text: `step ${index + 1}`,
+      createdAt: minutesAgo(400 - index * 10),
+    })),
+  ];
+  return {
+    requested,
+    catalog: async () => catalog,
+    shell: async () => ({
+      projects: [{ id: "project-1", title: "Alpha", workspaceRoot: "/work/alpha" }],
+      threads: [triageThread("supervisor", "project-1", { latestTurn: { state: "completed" } })],
+    }),
+    thread: async (threadId, options) => {
+      requested.push({ threadId, ...options });
+      return { thread: { id: threadId, messages }, page: { hasMore: true } };
+    },
+    dispatch: async () => ({ sequence: 1 }),
+  };
+}
+
+function selfDrivenManager(port: T3FleetPort): FleetManager {
+  return new FleetManager(port, { now: () => TRIAGE_NOW });
+}
+
+describe("fleet brief bounds", () => {
+  test("returns the whole turn window and no bounds report when no bound is asked for", async () => {
+    const port = makeSelfDrivenPort();
+
+    const brief = await selfDrivenManager(port).brief("supervisor", { turnLimit: 3 });
+
+    expect(brief.messages).toHaveLength(41);
+    expect(brief.bounds).toBeUndefined();
+    expect(port.requested).toEqual([{ threadId: "supervisor", turnLimit: 3 }]);
+  });
+
+  test("caps the projection at the newest messages whatever the turn window returns", async () => {
+    const port = makeSelfDrivenPort();
+
+    const brief = await selfDrivenManager(port).brief("supervisor", {
+      turnLimit: 3,
+      maxMessages: 6,
+    });
+
+    expect(brief.messages.map((message) => message.id)).toEqual([
+      "a35",
+      "a36",
+      "a37",
+      "a38",
+      "a39",
+      "a40",
+    ]);
+    expect(brief.bounds).toEqual({
+      turnLimit: 3,
+      maxMessages: 6,
+      since: null,
+      available: 41,
+      returned: 6,
+      dropped: 35,
+    });
+  });
+
+  test("keeps messages at or newer than the recency cutoff and reports the cutoff used", async () => {
+    const port = makeSelfDrivenPort();
+
+    const brief = await selfDrivenManager(port).brief("supervisor", {
+      turnLimit: 50,
+      sinceMilliseconds: 60 * 60_000,
+    });
+
+    expect(brief.messages.map((message) => message.id)).toEqual([
+      "a35",
+      "a36",
+      "a37",
+      "a38",
+      "a39",
+      "a40",
+    ]);
+    expect(brief.bounds).toEqual({
+      turnLimit: 50,
+      maxMessages: null,
+      since: "2030-03-01T11:00:00.000Z",
+      available: 41,
+      returned: 6,
+      dropped: 35,
+    });
+  });
+
+  test("applies the message cap to what survives the recency bound", async () => {
+    const port = makeSelfDrivenPort();
+
+    const brief = await selfDrivenManager(port).brief("supervisor", {
+      turnLimit: 50,
+      sinceMilliseconds: 60 * 60_000,
+      maxMessages: 2,
+    });
+
+    expect(brief.messages.map((message) => message.id)).toEqual(["a39", "a40"]);
+    expect(brief.bounds).toMatchObject({ maxMessages: 2, available: 41, returned: 2, dropped: 39 });
+  });
+
+  test("keeps the whole window when the cap is larger than the window", async () => {
+    const port = makeSelfDrivenPort();
+
+    const brief = await selfDrivenManager(port).brief("supervisor", {
+      turnLimit: 3,
+      maxMessages: 500,
+    });
+
+    expect(brief.bounds).toMatchObject({ available: 41, returned: 41, dropped: 0 });
+  });
+
+  test("never counts an undated message as inside the recency bound", async () => {
+    const port = makeSelfDrivenPort();
+    const undated = { id: "a41", role: "assistant", text: "no timestamp" };
+    const original = port.thread;
+    port.thread = async (threadId, options) => {
+      const detail = (await original(threadId, options)) as {
+        thread: { messages: Array<Record<string, unknown>> };
+      };
+      return { thread: { ...detail.thread, messages: [...detail.thread.messages, undated] } };
+    };
+
+    const brief = await selfDrivenManager(port).brief("supervisor", {
+      sinceMilliseconds: 60 * 60_000,
+    });
+
+    expect(brief.messages.map((message) => message.id)).not.toContain("a41");
+  });
+
+  test("spends the character budget on the messages the cap kept", async () => {
+    const port = makeSelfDrivenPort();
+
+    const brief = await selfDrivenManager(port).brief("supervisor", {
+      maxMessages: 2,
+      maxTotalCharacters: 9,
+    });
+
+    expect(brief.messages.map((message) => message.text)).toEqual(["st", "step 40"]);
+    expect(brief.bounds).toMatchObject({ returned: 2, dropped: 39 });
+  });
+
+  test("rejects a message cap outside its range before calling T3", async () => {
+    const port = makeSelfDrivenPort();
+    const manager = selfDrivenManager(port);
+
+    expect(manager.brief("supervisor", { maxMessages: 0 })).rejects.toThrow("between 1 and 1000");
+    expect(manager.brief("supervisor", { maxMessages: 1_001 })).rejects.toThrow(
+      "between 1 and 1000",
+    );
+    expect(manager.brief("supervisor", { maxMessages: 2.5 })).rejects.toThrow("between 1 and 1000");
+    expect(port.requested).toEqual([]);
+  });
+});
