@@ -147,7 +147,7 @@ const noProbe: ProviderProbe = { read: async () => [] };
  * that, `limits` would read the developer's own configuration, spawn the real `codex` and `grok`
  * CLIs, and reach the network during `bun test`.
  */
-function harness(ledger: ScheduleLedger) {
+function harness(ledger: ScheduleLedger, environment: SchedulerT3Port = t3) {
   let stdout = "";
   let stderr = "";
   const directory = mkdtempSync(join(tmpdir(), "t3chief-cli-"));
@@ -155,7 +155,7 @@ function harness(ledger: ScheduleLedger) {
   const dependencies: CliDependencies = {
     configStore: new ConfigStore({ configDirectory: directory, stateDirectory: directory }),
     ledger,
-    resolveEnvironment: async () => t3,
+    resolveEnvironment: async () => environment,
     hostJobs: new FakeHostJobs(),
     limitsSource: new FakeLimitsSource(),
     codexProbe: noProbe,
@@ -203,7 +203,7 @@ describe("CLI", () => {
     const code = await runCli(["--version"], io.dependencies);
 
     expect(code).toBe(0);
-    expect(io.stdout()).toBe("0.8.0\n");
+    expect(io.stdout()).toBe("0.9.0\n");
     expect(io.stderr()).toBe("");
   });
 
@@ -935,5 +935,389 @@ describe("CLI", () => {
     expect(JSON.parse(stopped.stdout()).data).toEqual(
       expect.objectContaining({ id: windowId, status: "stopped" }),
     );
+  });
+});
+
+/** Ages relative to the run, so a staleness bound means the same thing on every machine. */
+function agoMinutes(minutes: number): string {
+  return new Date(Date.now() - minutes * 60_000).toISOString();
+}
+
+function triageEnvironment(): SchedulerT3Port {
+  return {
+    ...t3,
+    shell: async () => ({
+      projects: [
+        { id: "project-1", title: "Alpha", workspaceRoot: "/work/alpha" },
+        { id: "project-2", title: "Beta", workspaceRoot: "/work/beta" },
+      ],
+      threads: [
+        {
+          id: "alpha-fresh",
+          projectId: "project-1",
+          title: "Fresh",
+          latestTurn: { state: "completed" },
+          session: { status: "idle" },
+          settledOverride: null,
+          archivedAt: null,
+          updatedAt: agoMinutes(10),
+        },
+        {
+          id: "alpha-old",
+          projectId: "project-1",
+          title: "Old",
+          latestTurn: { state: "failed" },
+          session: { status: "idle" },
+          settledOverride: null,
+          archivedAt: null,
+          updatedAt: agoMinutes(4_320),
+        },
+        {
+          id: "beta-old",
+          projectId: "project-2",
+          title: "Waiting",
+          latestTurn: { state: "completed" },
+          session: { status: "idle" },
+          settledOverride: null,
+          archivedAt: null,
+          hasPendingUserInput: true,
+          updatedAt: agoMinutes(2_880),
+        },
+      ],
+    }),
+  };
+}
+
+/** One user message and a run of assistant messages: one turn, many messages. */
+function selfDrivenEnvironment(): SchedulerT3Port {
+  const messages = [
+    { id: "u1", role: "user", text: "Supervise.", createdAt: agoMinutes(600) },
+    ...Array.from({ length: 12 }, (_, index) => ({
+      id: `a${index + 1}`,
+      role: "assistant",
+      text: `step ${index + 1}`,
+      createdAt: agoMinutes(120 - index * 10),
+    })),
+  ];
+  return { ...t3, thread: async (threadId) => ({ thread: { id: threadId, messages } }) };
+}
+
+function recordingEnvironment(): SchedulerT3Port & { dispatched: Array<Record<string, unknown>> } {
+  const dispatched: Array<Record<string, unknown>> = [];
+  return {
+    ...t3,
+    dispatched,
+    dispatch: async (command: Record<string, unknown>) => {
+      dispatched.push(command);
+      return { sequence: 1 };
+    },
+  };
+}
+
+function message(dispatched: Record<string, unknown>): string {
+  return (dispatched.message as { text: string }).text;
+}
+
+describe("CLI status filters", () => {
+  test("keeps the unfiltered human report exactly as it was", async () => {
+    using ledger = new ScheduleLedger(":memory:");
+    const io = harness(ledger, triageEnvironment());
+
+    const code = await runCli(["status"], io.dependencies);
+
+    expect(code).toBe(0);
+    expect(io.stdout()).toBe(
+      [
+        "total=3  blocked=1  failed=1  review=1",
+        "blocked-input      beta-old  Beta / Waiting",
+        "failed             alpha-old  Alpha / Old",
+        "review             alpha-fresh  Alpha / Fresh",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  test("filters to one project, and the filtered set stays a subset", async () => {
+    using ledger = new ScheduleLedger(":memory:");
+    const io = harness(ledger, triageEnvironment());
+
+    const code = await runCli(["--json", "status", "--project", "Beta"], io.dependencies);
+    const result = JSON.parse(io.stdout());
+
+    expect(code).toBe(0);
+    expect(result.data.threads.map((thread: { id: string }) => thread.id)).toEqual(["beta-old"]);
+    expect(result.data.summary).toEqual({ total: 1, blocked: 1 });
+  });
+
+  test("filters to repeated states", async () => {
+    using ledger = new ScheduleLedger(":memory:");
+    const io = harness(ledger, triageEnvironment());
+
+    const code = await runCli(
+      ["--json", "status", "--state", "failed", "--state", "blocked"],
+      io.dependencies,
+    );
+    const result = JSON.parse(io.stdout());
+
+    expect(code).toBe(0);
+    expect(result.data.threads.map((thread: { id: string }) => thread.id)).toEqual([
+      "beta-old",
+      "alpha-old",
+    ]);
+  });
+
+  test("filters to threads no newer than a staleness bound", async () => {
+    using ledger = new ScheduleLedger(":memory:");
+    const io = harness(ledger, triageEnvironment());
+
+    const code = await runCli(["--json", "status", "--stale", "1d"], io.dependencies);
+    const result = JSON.parse(io.stdout());
+
+    expect(code).toBe(0);
+    expect(result.data.threads.map((thread: { id: string }) => thread.id)).toEqual([
+      "beta-old",
+      "alpha-old",
+    ]);
+  });
+
+  test("orders by oldest update when asked", async () => {
+    using ledger = new ScheduleLedger(":memory:");
+    const io = harness(ledger, triageEnvironment());
+
+    const code = await runCli(["--json", "status", "--order", "age"], io.dependencies);
+    const result = JSON.parse(io.stdout());
+
+    expect(code).toBe(0);
+    expect(result.data.threads.map((thread: { id: string }) => thread.id)).toEqual([
+      "alpha-old",
+      "beta-old",
+      "alpha-fresh",
+    ]);
+  });
+
+  test("rejects an unknown order, an unknown state, and a unitless staleness bound", async () => {
+    for (const argv of [
+      ["--json", "status", "--order", "title"],
+      ["--json", "status", "--state", "done"],
+      ["--json", "status", "--stale", "2"],
+    ]) {
+      using ledger = new ScheduleLedger(":memory:");
+      const io = harness(ledger, triageEnvironment());
+
+      const code = await runCli(argv, io.dependencies);
+
+      expect(code).not.toBe(0);
+      expect(io.stdout()).toBe("");
+      expect(JSON.parse(io.stderr().trim())).toEqual(
+        expect.objectContaining({
+          ok: false,
+          error: expect.objectContaining({ message: expect.any(String) }),
+        }),
+      );
+    }
+  });
+});
+
+describe("CLI brief bounds", () => {
+  test("returns the whole turn window and reports no bounds by default", async () => {
+    using ledger = new ScheduleLedger(":memory:");
+    const io = harness(ledger, selfDrivenEnvironment());
+
+    const code = await runCli(["--json", "brief", "thread-1", "--turns", "3"], io.dependencies);
+    const result = JSON.parse(io.stdout());
+
+    expect(code).toBe(0);
+    expect(result.data.messages).toHaveLength(13);
+    expect(result.data).not.toHaveProperty("bounds");
+  });
+
+  test("bounds the same window to a message count", async () => {
+    using ledger = new ScheduleLedger(":memory:");
+    const io = harness(ledger, selfDrivenEnvironment());
+
+    const code = await runCli(
+      ["--json", "brief", "thread-1", "--turns", "3", "--max-messages", "5"],
+      io.dependencies,
+    );
+    const result = JSON.parse(io.stdout());
+
+    expect(code).toBe(0);
+    expect(result.data.messages).toHaveLength(5);
+    expect(result.data.messages.at(-1).id).toBe("a12");
+    expect(result.data.bounds).toEqual({
+      turnLimit: 3,
+      maxMessages: 5,
+      since: null,
+      available: 13,
+      returned: 5,
+      dropped: 8,
+    });
+  });
+
+  test("bounds the same window by age, and the message cap wins when it is smaller", async () => {
+    using ledger = new ScheduleLedger(":memory:");
+    const io = harness(ledger, selfDrivenEnvironment());
+
+    const byAge = await runCli(["--json", "brief", "thread-1", "--since", "65m"], io.dependencies);
+    const aged = JSON.parse(io.stdout());
+
+    expect(byAge).toBe(0);
+    expect(aged.data.bounds).toMatchObject({ maxMessages: null, available: 13, returned: 6 });
+
+    using second = new ScheduleLedger(":memory:");
+    const io2 = harness(second, selfDrivenEnvironment());
+    const both = await runCli(
+      ["--json", "brief", "thread-1", "--since", "65m", "--max-messages", "2"],
+      io2.dependencies,
+    );
+    const capped = JSON.parse(io2.stdout());
+
+    expect(both).toBe(0);
+    expect(capped.data.messages.map((entry: { id: string }) => entry.id)).toEqual(["a11", "a12"]);
+    expect(capped.data.bounds).toMatchObject({ returned: 2, dropped: 11 });
+  });
+
+  test("rejects a message cap outside its range and a unitless age bound", async () => {
+    for (const argv of [
+      ["--json", "brief", "thread-1", "--max-messages", "0"],
+      ["--json", "brief", "thread-1", "--max-messages", "many"],
+      ["--json", "brief", "thread-1", "--since", "60"],
+    ]) {
+      using ledger = new ScheduleLedger(":memory:");
+      const io = harness(ledger, selfDrivenEnvironment());
+
+      const code = await runCli(argv, io.dependencies);
+
+      expect(code).not.toBe(0);
+      expect(io.stdout()).toBe("");
+    }
+  });
+});
+
+describe("CLI delegation footers", () => {
+  test("appends the reply-back footer unchanged", async () => {
+    using ledger = new ScheduleLedger(":memory:");
+    const environment = recordingEnvironment();
+    const io = harness(ledger, environment);
+
+    const code = await runCli(
+      ["--json", "thread", "send", "thread-1", "--prompt", "Do the work.", "--reply-to", "chief-1"],
+      io.dependencies,
+    );
+
+    expect(code).toBe(0);
+    expect(message(environment.dispatched[0] as Record<string, unknown>)).toBe(
+      [
+        "Do the work.",
+        "",
+        "---",
+        "REPLY-TO THREAD: chief-1",
+        "The delegating manager runs in T3 thread chief-1. When you complete this work, become blocked,",
+        "or need a decision, report back with:",
+        "",
+        "  t3chief thread send chief-1 --prompt 'Concise status: outcome, evidence, open questions.'",
+        "",
+        "Send one concise reply, not a transcript. Never settle or interrupt that thread.",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  test("appends the do-not-report footer on a follow-up", async () => {
+    using ledger = new ScheduleLedger(":memory:");
+    const environment = recordingEnvironment();
+    const io = harness(ledger, environment);
+
+    const code = await runCli(
+      ["--json", "thread", "send", "thread-1", "--prompt", "Do the work.", "--do-not-report"],
+      io.dependencies,
+    );
+
+    expect(code).toBe(0);
+    expect(message(environment.dispatched[0] as Record<string, unknown>)).toBe(
+      [
+        "Do the work.",
+        "",
+        "---",
+        "DO NOT REPORT BACK",
+        "The delegator polls this thread and reads the result here. Do not send messages to the",
+        "delegator. Do not acknowledge this instruction. Keep working the assigned task, record",
+        "progress and evidence in your own report, and leave one concise result in this thread when",
+        "you finish or become blocked.",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  test("appends the do-not-report footer on a new thread", async () => {
+    using ledger = new ScheduleLedger(":memory:");
+    const environment = recordingEnvironment();
+    const io = harness(ledger, environment);
+
+    const code = await runCli(
+      [
+        "--json",
+        "thread",
+        "start",
+        "--project",
+        "project-1",
+        "--title",
+        "Worker",
+        "--provider",
+        "codex",
+        "--model",
+        "gpt-test",
+        "--prompt",
+        "Do the work.",
+        "--do-not-report",
+      ],
+      io.dependencies,
+    );
+
+    expect(code).toBe(0);
+    expect(message(environment.dispatched[0] as Record<string, unknown>)).toContain(
+      "DO NOT REPORT BACK",
+    );
+  });
+
+  test("rejects a prompt that both asks for a reply and forbids one", async () => {
+    for (const command of [
+      ["thread", "send", "thread-1"],
+      [
+        "thread",
+        "start",
+        "--project",
+        "project-1",
+        "--title",
+        "Worker",
+        "--provider",
+        "codex",
+        "--model",
+        "gpt-test",
+      ],
+    ]) {
+      using ledger = new ScheduleLedger(":memory:");
+      const environment = recordingEnvironment();
+      const io = harness(ledger, environment);
+
+      const code = await runCli(
+        [
+          "--json",
+          ...command,
+          "--prompt",
+          "Do the work.",
+          "--reply-to",
+          "chief-1",
+          "--do-not-report",
+        ],
+        io.dependencies,
+      );
+
+      expect(code).not.toBe(0);
+      expect(environment.dispatched).toEqual([]);
+      expect(JSON.parse(io.stderr().trim()).error.message).toContain(
+        "Use only one of --reply-to or --do-not-report.",
+      );
+    }
   });
 });

@@ -100,18 +100,43 @@ partial. Do not invent or delegate new roadmap work until the source is fresh.
 
 ## Spend context in layers
 
-`status` loads no message bodies. Classify the entire fleet from that result first.
-
-Open only threads that need a decision: blocked on approval or input, failed, newly completed,
-stale, or named by the user. Start with:
+`status` loads no message bodies. Classify the entire fleet from that result first, then narrow it
+rather than reading all of it:
 
 ```sh
-t3chief --json brief THREAD_ID --turns 10
+t3chief --json status --state blocked --state failed
+t3chief --json status --project PROJECT_ID
+t3chief --json status --stale 2d --order age
 ```
 
-Increase to `--turns 50` only when the decision needs it. The unit is a user-anchored turn, so one
-turn may include related agent and subagent messages. The CLI also caps each message and the total
-projection. Do not fetch or copy a full transcript into a manager thread.
+`--state` is repeatable and takes `blocked-approval`, `blocked-input`, `failed`, `running`,
+`queued`, `review`, `idle`, `snoozed`, or `blocked` for both blocked states. `--project` takes an
+ID, an unambiguous ID prefix, or an exact title, and fails rather than returning an empty fleet.
+`--stale` takes a duration and keeps only threads not updated within it, which is how you find work
+that has been sitting. `--order age` puts the oldest update first. The summary always counts what
+was returned, and none of it loads a message body.
+
+Open only threads that need a decision: blocked on approval or input, failed, newly completed,
+stale, or named by the user. Bound every read:
+
+```sh
+t3chief --json brief THREAD_ID --max-messages 40
+t3chief --json brief THREAD_ID --since 6h
+```
+
+**`--turns` does not bound cost.** It counts user-anchored turns, and a thread that drives itself
+accumulates many assistant messages against few user messages. On a long-running manager thread —
+exactly the thread a supervisor most needs to inspect — `--turns 3` can still return several
+hundred messages. Reaching for a smaller `--turns` does not make the read smaller.
+
+Use `--max-messages` as the bound instead, and add `--since DURATION` when only recent activity
+matters. Both keep the newest messages; a duration is one whole number and one unit (`s`, `m`, `h`,
+`d`, `w`). `--turns` still selects the window T3 returns, and the new bounds decide what is
+projected into your context, so `--turns 50 --max-messages 40` is a wide window and a small read.
+When either bound is present the envelope reports how many messages the window held and how many
+were dropped. The CLI also caps each message and the total projection.
+
+Do not fetch or copy a full transcript into a manager thread.
 
 ## Manage the fleet
 
@@ -182,16 +207,27 @@ Use `--worktree --base-branch BRANCH` when T3 should prepare isolation. Follow u
 
 ### Reply-back channel
 
-If the delegator wants a response, it must say so in the message: pass its own thread ID with
-`--reply-to THREAD_ID` on `thread start` or `thread send`. The CLI appends a deterministic
-`REPLY-TO THREAD:` footer instructing the worker to report outcome, evidence, and open questions
-back with `t3chief thread send`. A persistent chief passes its own T3 thread ID; a session that is
-not a T3 thread has no reply address, so omit the flag and poll with `status` and `brief` instead.
-Never hand-write the footer; the flag keeps the format uniform.
+Decide, per delegation, whether the worker pushes its outcome to you or you pull it.
+
+If you want a response, pass your own thread ID with `--reply-to THREAD_ID` on `thread start` or
+`thread send`. The CLI appends a deterministic `REPLY-TO THREAD:` footer instructing the worker to
+report outcome, evidence, and open questions back with `t3chief thread send`. A persistent chief
+passes its own T3 thread ID; a session that is not a T3 thread has no reply address, so it cannot
+use the flag.
+
+If you will poll instead, say so with `--do-not-report`. The CLI appends a deterministic
+`DO NOT REPORT BACK` footer telling the worker not to message the delegator, not to acknowledge the
+instruction, to keep working the assigned task, to record progress and evidence in its own report,
+and to leave one concise result in its own thread when it finishes or is blocked. Read that result
+later with `status` and `brief`.
+
+The two flags are mutually exclusive and the CLI rejects the pair. Never hand-write either footer;
+the flags keep the format uniform.
 
 When a prompt you receive carries a `REPLY-TO THREAD:` footer, send one concise reply to that
 thread when you finish, become blocked, or need a decision. Do not settle or interrupt the
-delegator's thread.
+delegator's thread. When it carries a `DO NOT REPORT BACK` footer, send nothing and leave the
+result in your own thread.
 
 ## Schedule work
 

@@ -14,16 +14,17 @@ t3chief project create --title TITLE --workspace ABSOLUTE_PATH [--create-workspa
 t3chief project icon --project REF (--path IMAGE_FILE | --clear)
 t3chief project rename --project REF [--title TITLE] [--root ABSOLUTE_PATH]
   [--provider INSTANCE --model SLUG] [--effort VALUE] [--option ID=VALUE]
-t3chief status
-t3chief brief THREAD --turns COUNT
+t3chief status [--project REF] [--state STATE] [--stale DURATION] [--order state|age]
+t3chief brief THREAD [--turns COUNT] [--max-messages COUNT] [--since DURATION]
 t3chief settle-ready [--apply]
 
-t3chief thread send THREAD [--reply-to SENDER_THREAD] (--prompt TEXT | --prompt-file PATH | stdin)
+t3chief thread send THREAD [--reply-to SENDER_THREAD | --do-not-report]
+  (--prompt TEXT | --prompt-file PATH | stdin)
 t3chief thread start --project ID --title TITLE --provider INSTANCE --model SLUG
   [--effort VALUE] [--option ID=VALUE]
   [--runtime-mode MODE] [--interaction-mode default|plan]
   [--worktree --base-branch BRANCH --start-from-origin]
-  [--reply-to SENDER_THREAD]
+  [--reply-to SENDER_THREAD | --do-not-report]
   (--prompt TEXT | --prompt-file PATH | stdin)
 t3chief thread interrupt THREAD
 t3chief thread settle THREAD
@@ -87,3 +88,12 @@ Schedule definition flags:
 
 Use the refs returned by `jobs --json`. Common forms are `t3:SCHEDULE_KEY` and
 `systemd:user:UNIT.timer`.
+
+A `DURATION` is one whole number and one unit: `s`, `m`, `h`, `d`, or `w`. `90m` and `3d` are
+valid; `90` and `1h30m` are not.
+
+`status` states are `blocked-approval`, `blocked-input`, `failed`, `running`, `queued`, `review`,
+`idle`, `snoozed`, and `blocked` for both blocked states. `--state` is repeatable.
+
+`brief --turns` counts user-anchored turns and does not bound the message count; `--max-messages`
+and `--since` do. `--reply-to` and `--do-not-report` are mutually exclusive.
